@@ -115,13 +115,20 @@ try:
     import importlib
     unify_spec = importlib.util.find_spec("unify")
     if unify_spec is None:
-        # unify not installed yet; endpoints will guard and return helpful error
-        UNIFY_AVAILABLE = False
+        # Try alternative module name
+        unifyai_spec = importlib.util.find_spec("unifyai")
+        if unifyai_spec is None:
+            UNIFY_AVAILABLE = False
+            unify = None  # type: ignore
+        else:
+            UNIFY_AVAILABLE = True
+            import unifyai as unify  # type: ignore
     else:
         UNIFY_AVAILABLE = True
         import unify  # type: ignore
 except Exception:
     UNIFY_AVAILABLE = False
+    unify = None  # type: ignore
 
 
 def get_llm_client():
