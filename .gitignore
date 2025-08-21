@@ -78,3 +78,9 @@ agenthub/agents/youtube/db
 
 # Mobile development
 android-sdk/ 
+
+MONGO_URL="mongodb://localhost:27017"
+DB_NAME="test_database"
+CORS_ORIGINS="*"
+EMERGENT_LLM_KEY="sk-emergent-07b5e2b74Ef07F5D7A"
+OPENAI_API_KEY="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"
