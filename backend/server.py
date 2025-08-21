@@ -10,6 +10,12 @@ from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timezone, date, time
 
+# OpenAI (official) async client
+try:
+    from openai import AsyncOpenAI
+except Exception:  # library may not be installed yet; we guard when used
+    AsyncOpenAI = None  # type: ignore
+
 # ============================
 # Env & App Bootstrap
 # ============================
@@ -106,60 +112,46 @@ class ChatResponse(BaseModel):
 
 
 # ============================
-# LLM via Emergent Integrations (playbook): unify client
+# LLM via OpenAI official SDK (using OPENAI_API_KEY)
 # ============================
-# We must use Emergent Universal LLM Key (EMERGENT_LLM_KEY)
-# Model: gpt-4.1 via OpenAI provider through the integration layer
-try:
-    # Lazy import pattern inside functions to avoid import errors if missing during startup
-    import importlib
-    unify_spec = importlib.util.find_spec("unify")
-    if unify_spec is None:
-        # Try alternative module name
-        unifyai_spec = importlib.util.find_spec("unifyai")
-        if unifyai_spec is None:
-            UNIFY_AVAILABLE = False
-            unify = None  # type: ignore
-        else:
-            UNIFY_AVAILABLE = True
-            import unifyai as unify  # type: ignore
-    else:
-        UNIFY_AVAILABLE = True
-        import unify  # type: ignore
-except Exception:
-    UNIFY_AVAILABLE = False
-    unify = None  # type: ignore
 
-
-def get_llm_client():
-    api_key = os.environ.get("EMERGENT_LLM_KEY")
+def get_openai_client() -> AsyncOpenAI:
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="Missing EMERGENT_LLM_KEY on server")
-    if not UNIFY_AVAILABLE:
-        raise HTTPException(status_code=500, detail="LLM integration not installed. Please contact admin.")
-    # Use Unify abstraction to target OpenAI gpt-4.1
-    # The identifier format follows the integration playbook: "gpt-4.1@openai"
-    return unify.Unify("gpt-4.1@openai", api_key=api_key)
+        raise HTTPException(status_code=500, detail="Missing OPENAI_API_KEY on server")
+    if AsyncOpenAI is None:
+        raise HTTPException(status_code=500, detail="OpenAI SDK not installed on server")
+    return AsyncOpenAI(api_key=api_key)
 
 
-async def run_completion(prompt: str) -> str:
-    """Execute a completion request using the Unify client. The library supports awaitable generate."""
-    client = get_llm_client()
+async def run_completion(history_lines: List[str], user_msg: str) -> str:
+    client = get_openai_client()
+    # Build messages with minimal system prompt + recent context
+    messages = []
+    system_prompt = "You are Unis AI, a helpful, concise assistant."
+    messages.append({"role": "system", "content": system_prompt})
+
+    # Convert context pairs into alternating messages where possible
+    # history_lines contains lines like "User: ..." and "Assistant: ..."
+    # We'll compress them to messages
+    for line in history_lines:
+        if line.startswith("User: "):
+            messages.append({"role": "user", "content": line.replace("User: ", "", 1)})
+        elif line.startswith("Assistant: "):
+            messages.append({"role": "assistant", "content": line.replace("Assistant: ", "", 1)})
+
+    messages.append({"role": "user", "content": user_msg})
+
     try:
-        # Some unify versions expose async generate; fall back to sync if needed
-        gen = getattr(client, 'generate', None)
-        if gen is None:
-            raise RuntimeError("LLM client missing generate()")
-        result = gen(prompt)
-        if hasattr(result, "__await__"):
-            text = await result
-        else:
-            text = result
-        if not isinstance(text, str):
-            text = str(text)
-        return text
+        resp = await client.chat.completions.create(
+            model="gpt-4.1",
+            messages=messages,
+            temperature=0.7,
+        )
+        content = resp.choices[0].message.content if resp and resp.choices else ""
+        return content or ""
     except Exception as e:
-        logger.exception("LLM generation failed")
+        logger.exception("OpenAI generation failed")
         raise HTTPException(status_code=500, detail=f"Chat completion failed: {e}")
 
 
@@ -173,7 +165,18 @@ async def root():
 
 @api_router.get("/health")
 async def health():
-    return {"status": "ok", "service": "unis-ai"}
+    # indicate LLM readiness too
+    ok = True
+    detail = "ok"
+    try:
+        _ = os.environ.get("OPENAI_API_KEY")
+        if not _:
+            ok = False
+            detail = "missing OPENAI_API_KEY"
+    except Exception:
+        ok = False
+        detail = "key check failed"
+    return {"status": "ok" if ok else "degraded", "detail": detail, "service": "unis-ai"}
 
 
 @api_router.post("/status", response_model=StatusCheck)
@@ -207,10 +210,8 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         context_lines.append(f"User: {h.get('user_message','')}")
         context_lines.append(f"Assistant: {h.get('assistant_response','')}")
 
-    full_prompt = "\n".join(context_lines + [f"User: {msg}", "Assistant:"])
-
     # Call LLM
-    completion = await run_completion(full_prompt)
+    completion = await run_completion(context_lines, msg)
 
     # Persist
     chat_msg = ChatMessage(
